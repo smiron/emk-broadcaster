@@ -1,43 +1,56 @@
 import pywinusb.hid as hid
 import threading
+import socket
+import sys
+import os
+import logging
+import struct
+import collections
+from aes import rijndael
 
 windows = True
 
-import sys, os
-import logging
 logger = logging.getLogger("emotiv")
 
-from aes import rijndael
-import struct
+_listeningSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-from threading import Thread
-
-import socket
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-#UDP_IP = "192.168.0.255"
-#UDP_PORT = 9011
+TCP_IP = ''
+TCP_PORT = 9011
 
 
 sensorBits = {
-  'F3': [10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7], 
-  'FC6': [214, 215, 200, 201, 202, 203, 204, 205, 206, 207, 192, 193, 194, 195], 
-  'P7': [84, 85, 86, 87, 72, 73, 74, 75, 76, 77, 78, 79, 64, 65], 
-  'T8': [160, 161, 162, 163, 164, 165, 166, 167, 152, 153, 154, 155, 156, 157], 
-  'F7': [48, 49, 50, 51, 52, 53, 54, 55, 40, 41, 42, 43, 44, 45], 
-  'F8': [178, 179, 180, 181, 182, 183, 168, 169, 170, 171, 172, 173, 174, 175], 
-  'T7': [66, 67, 68, 69, 70, 71, 56, 57, 58, 59, 60, 61, 62, 63], 
-  'P8': [158, 159, 144, 145, 146, 147, 148, 149, 150, 151, 136, 137, 138, 139], 
-  'AF4': [196, 197, 198, 199, 184, 185, 186, 187, 188, 189, 190, 191, 176, 177], 
-  'F4': [216, 217, 218, 219, 220, 221, 222, 223, 208, 209, 210, 211, 212, 213], 
-  'AF3': [46, 47, 32, 33, 34, 35, 36, 37, 38, 39, 24, 25, 26, 27], 
-  'O2': [140, 141, 142, 143, 128, 129, 130, 131, 132, 133, 134, 135, 120, 121], 
-  'O1': [102, 103, 88, 89, 90, 91, 92, 93, 94, 95, 80, 81, 82, 83], 
+  'F3': [10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7],
+  'FC6': [214, 215, 200, 201, 202, 203, 204, 205, 206, 207, 192, 193, 194, 195],
+  'P7': [84, 85, 86, 87, 72, 73, 74, 75, 76, 77, 78, 79, 64, 65],
+  'T8': [160, 161, 162, 163, 164, 165, 166, 167, 152, 153, 154, 155, 156, 157],
+  'F7': [48, 49, 50, 51, 52, 53, 54, 55, 40, 41, 42, 43, 44, 45],
+  'F8': [178, 179, 180, 181, 182, 183, 168, 169, 170, 171, 172, 173, 174, 175],
+  'T7': [66, 67, 68, 69, 70, 71, 56, 57, 58, 59, 60, 61, 62, 63],
+  'P8': [158, 159, 144, 145, 146, 147, 148, 149, 150, 151, 136, 137, 138, 139],
+  'AF4': [196, 197, 198, 199, 184, 185, 186, 187, 188, 189, 190, 191, 176, 177],
+  'F4': [216, 217, 218, 219, 220, 221, 222, 223, 208, 209, 210, 211, 212, 213],
+  'AF3': [46, 47, 32, 33, 34, 35, 36, 37, 38, 39, 24, 25, 26, 27],
+  'O2': [140, 141, 142, 143, 128, 129, 130, 131, 132, 133, 134, 135, 120, 121],
+  'O1': [102, 103, 88, 89, 90, 91, 92, 93, 94, 95, 80, 81, 82, 83],
   'FC5': [28, 29, 30, 31, 16, 17, 18, 19, 20, 21, 22, 23, 8, 9]
 }
 
 g_battery = 0
+
+lock = threading.Lock()
+_connectedSockets = list()
+
+def ListenerService():
+    _listeningSocket.bind((TCP_IP, TCP_PORT))
+    _listeningSocket.listen(5)
+    
+    print 'Listening ...'
+    while(True):
+        conn, addr = _listeningSocket.accept()
+        with lock:
+            _connectedSockets.append(conn)
+        
+    return
 
 class EmotivPacket(object):
   def __init__(self, data):
@@ -51,7 +64,7 @@ class EmotivPacket(object):
     self.sync = self.counter == 0xe9
     self.gyroX = ord(data[29]) - 102
     self.gyroY = ord(data[30]) - 104
-    #assert ord(data[15]) == 0
+    # assert ord(data[15]) == 0
     
     for name, bits in sensorBits.items():
       level = 0
@@ -59,7 +72,7 @@ class EmotivPacket(object):
         level <<= 1
         b, o = (bits[i] / 8) + 1, bits[i] % 8
         level |= (ord(data[b]) >> o) & 1
-      strength = 4#(ord(data[j]) >> 3) & 1
+      strength = 4  # (ord(data[j]) >> 3) & 1
       setattr(self, name, (level, strength))
   
   def __repr__(self):
@@ -72,8 +85,7 @@ class EmotivPacket(object):
       )
 
 class Emotiv(object):
-  def __init__(self, headsetId=0, research_headset = False):
-    
+  def __init__(self, headsetId=0, research_headset=False):
     self._goOn = True
     self.packets = []
     
@@ -82,6 +94,8 @@ class Emotiv(object):
     else:
       logger.error("Unable to connect to the Emotiv EPOC receiver :-(")
       sys.exit(1)
+      
+    
   
   def setupWin(self, headsetId):
     filter = hid.HidDeviceFilter(vendor_id=0x21A1, product_name='00000000000')
@@ -99,33 +113,22 @@ class Emotiv(object):
     self.setupCrypto(self.device.serial_number, feature)
     print 'after'
     
-    TCP_IP = ''
-    TCP_PORT = 9011
-
-    #sock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-    #sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
-    sock.bind((TCP_IP, TCP_PORT))
-    sock.listen(5)
-    
-    print 'Listening ...'
-    conn, addr = sock.accept()
-    print conn
-    
     def handle(data):      
       assert data[0] == 0
-      self.gotData(''.join(map(chr, data[1:])), conn)
-      
-    
+      self.gotData(''.join(map(chr, data[1:])))
       
     print 'after defined' 
     self.device.set_raw_data_handler(handle)
     print 'device set'
+    
+    self.listenerThread = threading.Thread(target=ListenerService)
+    self.listenerThread.start()
+    
     return True
    
   
   def setupCrypto(self, sn, feature):
-    type = 1 #feature[5]
+    type = 1  # feature[5]
     type &= 0xF
     type = type == 0
 
@@ -162,7 +165,7 @@ class Emotiv(object):
     for i in k: print "0x%.02x " % (ord(i))
 
 
-  def gotData(self, data, connectedSocket):    
+  def gotData(self, data):    
     assert len(data) == 32
     data = self.rijn.decrypt(data[:16]) + self.rijn.decrypt(data[16:])
     p = EmotivPacket(data);
@@ -186,15 +189,19 @@ class Emotiv(object):
      p.O2[0],
      p.O1[0],
      p.FC5[0])
-
-    #ip2 = "192.168.0.106"
     
-    #sock.sendto(message, (UDP_IP, UDP_PORT))
-    
-    connectedSocket.send(message)
-    print message
-    
-    #print EmotivPacket(data)
+    with lock:
+        disconnectedSockets = list()
+        if(len(_connectedSockets) == 0):
+            return
+        for socket in _connectedSockets:
+            try:
+                socket.send(message)
+            except:
+                disconnectedSockets.append(socket)
+                
+        for socket in disconnectedSockets: 
+            _connectedSockets.remove(socket)
     
   
   def dequeue(self):
