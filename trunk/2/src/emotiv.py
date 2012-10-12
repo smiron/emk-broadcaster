@@ -167,7 +167,7 @@ class Emotiv(object):
     data = self.rijn.decrypt(data[:16]) + self.rijn.decrypt(data[16:])
     p = EmotivPacket(data);
 
-    message = '%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i' % (
+    message = 'start,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,' % (
      p.counter,
      p.battery,
      p.gyroX,
@@ -192,6 +192,7 @@ class Emotiv(object):
     #sock.sendto(message, (UDP_IP, UDP_PORT))
     
     connectedSocket.send(message)
+    print message
     
     #print EmotivPacket(data)
     
